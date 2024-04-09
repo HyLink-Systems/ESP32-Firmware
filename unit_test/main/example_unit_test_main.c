@@ -14,7 +14,6 @@
 /* This application has a test subproject in 'test' directory, all the
  * interesting things happen there. See ../test/main/example_idf_test_runner_test.c
  * and the makefiles in ../test/ directory.
- *
  * This specific app_main function is provided only to illustrate the layout
  * of a project.
  */
