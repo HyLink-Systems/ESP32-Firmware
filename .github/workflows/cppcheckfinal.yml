@@ -6,7 +6,7 @@ on:
       - main
 
 jobs:
-  linting:
+  cppcheckfinal:  # Renamed job to cppcheckfinal
     name: cppcheck
     runs-on: ubuntu-latest  # Linux runner
 
@@ -17,6 +17,7 @@ jobs:
       - name: Run Cppcheck
         uses: tonybaloney/cppcheck-action@master
         with:
-          path: 'unit_test/main'  # Path to the main file to be checked
+          path: 'unit_test/main/'  # Path to the main file to be checked
           level: 'warning'         # Optional: specify the cppcheck level (default is 'warning')
           opts: '--additional-flags'  # Optional: add additional command line flags and options here
+
