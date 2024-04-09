@@ -17,6 +17,6 @@ jobs:
       - name: Run Cppcheck
         uses: tonybaloney/cppcheck-action@master
         with:
-          path: 'unit_test/main/'  # Path to the main file to be checked
-          args: --additional-flags  # Additional command line flags and options here
+          path: 'unit_test/main/'  # Path to the directory containing the C/C++ files
+          args: '*.c'  # Specify all .c files to be checked by cppcheck
 
