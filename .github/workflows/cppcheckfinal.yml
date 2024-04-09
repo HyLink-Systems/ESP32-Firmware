@@ -18,5 +18,4 @@ jobs:
         run: sudo apt-get install -y cppcheck  # Install cppcheck on the Linux runner
 
       - name: Run Cppcheck
-        run: cppcheck --enable=all 'unit_test/main/*.c'  # Run cppcheck on all .c files in unit_test/main/
-
+        run: cppcheck --enable=all 'unit_test/main'  # Run cppcheck on the main directory
