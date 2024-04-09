@@ -1,23 +1,22 @@
 name: Run Cppcheck
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
 
 jobs:
-  build:
-    runs-on: windows-latest
+  linting:
+    name: cppcheck
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
 
-      - name: Setup Cppcheck
-        uses: dawidd6/action-cppcheck@v2
-
       - name: Run Cppcheck
-        run: cppcheck --language=c++ --enable=all .
+        uses: tonybaloney/cppcheck-action@master
+        with:
+          path: 'unit_test'  # Update this with the relative path to the code you want to check
+          level: 'warning'   # Optional: specify the cppcheck level (default is 'warning')
+          opts: '--additional-flags'  # Optional: add additional command line flags and options here
