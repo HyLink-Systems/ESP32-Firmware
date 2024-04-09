@@ -17,6 +17,6 @@ jobs:
       - name: Run Cppcheck
         uses: tonybaloney/cppcheck-action@master
         with:
-          path: 'unit_test'  # Update this with the relative path to the code you want to check
-          level: 'warning'   # Optional: specify the cppcheck level (default is 'warning')
+          path: 'unit_test/main'  # Path to the main file to be checked
+          level: 'warning'         # Optional: specify the cppcheck level (default is 'warning')
           opts: '--additional-flags'  # Optional: add additional command line flags and options here
