@@ -7,7 +7,7 @@ on:
 
 jobs:
   linting:
-    name: cppcheckfinal
+    name: cppcheck
     runs-on: windows-latest
 
     steps:
