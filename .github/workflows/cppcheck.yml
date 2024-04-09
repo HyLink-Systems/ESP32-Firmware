@@ -1,0 +1,23 @@
+name: Run Cppcheck
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Cppcheck
+        uses: dawidd6/action-cppcheck@v2
+
+      - name: Run Cppcheck
+        run: cppcheck --language=c++ --enable=all .
