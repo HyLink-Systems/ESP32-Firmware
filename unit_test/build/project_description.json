@@ -1,7 +1,7 @@
 {
     "version":            "1",
     "project_name":       "unit_test",
-    "project_version":    "9bb584e",
+    "project_version":    "29ddd7d-dirty",
     "project_path":       "C:/Users/shini/Desktop/HydroLink/ESP32-Firmware/unit_test",
     "idf_path":           "C:/Users/shini/esp/v5.1.2/esp-idf",
     "build_dir":          "C:/Users/shini/Desktop/HydroLink/ESP32-Firmware/unit_test/build",
