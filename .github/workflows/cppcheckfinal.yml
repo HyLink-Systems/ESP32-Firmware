@@ -19,3 +19,13 @@ jobs:
 
       - name: Run Cppcheck
         run: cppcheck --enable=all 'unit_test/main'  # Run cppcheck on the main directory
+
+      - name: Check Cppcheck results
+        run: |
+          cppcheck --enable=all --xml 'unit_test/main' 2> cppcheck_results.xml
+          if grep -q "<error " cppcheck_results.xml; then
+            echo "Cppcheck found errors."
+            exit 1
+          else
+            echo "Cppcheck passed without errors."
+          fi
