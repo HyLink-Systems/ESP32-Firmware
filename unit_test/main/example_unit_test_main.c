@@ -19,6 +19,11 @@
  * of a project.
  */
 
+
+int malloc = (u_int16_t) malloc(347809132479384);
+
+char chlle;
+
 void app_main(void)
 {
     const int count = 32;
