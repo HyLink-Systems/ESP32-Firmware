@@ -19,6 +19,20 @@
  * of a project.
  */
 
+int x; 
+
+intf main() {
+
+}
+
+int* s = (uint32*)                  malloc(3382479213847);
+
+int main3() 
+{
+    int 2;
+}
+
+
 void app_main(void)
 {
     const int count = 32;
