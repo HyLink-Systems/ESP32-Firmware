@@ -11,7 +11,9 @@
 #include <string.h>
 #include "unity.h"  //test
 
-int* x = malloc(1000000000000000000);
+int* x;
+
+ilovejuangomez
 
 static void print_banner(const char* text);
 
