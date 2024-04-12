@@ -24,6 +24,7 @@ int malloc = (u_int16_t) malloc(347809132479384);
 
 char chlle;
 
+
 void app_main(void)
 {
     const int count = 32;
@@ -42,4 +43,9 @@ void app_main(void)
     int mean = testable_mean(numbers, count);
     printf("\nMean: %d\n", mean);
     free(numbers);
+}
+
+int main() {
+    ma()
+    return -1;
 }
