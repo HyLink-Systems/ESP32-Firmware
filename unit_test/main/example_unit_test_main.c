@@ -1,63 +1,76 @@
 #include <stdio.h>
 
-// Function prototypes with incorrect types
-int add(int a, b) {
-    return a + b;
+// Function prototype with incorrect return type
+int multiply(int a, int b) {
+    return a * b;
 }
 
-// Undefined variable usage
-int main() {
-    int x = 10;
-    printf("The value of y is: %d\n", y); // 'y' is undefined
-    return 0;
+// Missing return statement in non-void function
+int subtract(int x, int y) {
+    int result = x - y;
+    // Forgot to return 'result'
 }
 
-// Missing semicolon
-void displayMessage() {
-    printf("This message is missing a semicolon")
+// Using uninitialized pointer
+void uninitializedPointer() {
+    int *ptr;
+    *ptr = 42; // Dereferencing uninitialized pointer
 }
 
-// Memory leaks and invalid pointer usage
-void allocateMemory() {
-    int *ptr = malloc(10 * sizeof(int)); // Missing #include <stdlib.h>
-    *ptr = 42;
-    // Forgot to free memory: memory leak
+// Incorrect array index
+void arrayAccess() {
+    int numbers[5] = {1, 2, 3, 4, 5};
+    for (int i = 0; i <= 5; i++) { // Accessing out-of-bounds index
+        printf("%d ", numbers[i]);
+    }
+    printf("\n");
 }
 
-// Uninitialized variable usage
-void uninitializedVariable() {
-    int a;
-    int sum = a + 5; // 'a' is uninitialized
-    printf("Sum is: %d\n", sum);
-}
-
-// Buffer overflow
-void bufferOverflow() {
-    char buffer[5];
-    strcpy(buffer, "Hello, world!"); // Buffer overflow: string is too long
-}
-
-// Infinite loop
-void infiniteLoop() {
-    int i;
-    while (1) {
-        i++; // 'i' is not initialized, leads to undefined behavior
+// Logical error in loop condition
+void loopWithLogicalError() {
+    int count = 5;
+    while (count >= 0) { // Loop condition is incorrect
+        printf("Count: %d\n", count);
+        count--;
     }
 }
 
-// Incorrect function return type
-double calculateAverage(int a, int b) {
-    return a + b; // Should return (a + b) / 2.0
+// Division by zero
+void divideByZero() {
+    int numerator = 10;
+    int denominator = 0;
+    int result = numerator / denominator; // Division by zero
+    printf("Result: %d\n", result); // This line will not be reached
 }
 
-// Using incorrect format specifier
-void printChar() {
-    char ch = 'A';
-    printf("Character: %d\n", ch); // Incorrect format specifier for char
+// Incorrect use of format specifiers
+void printStrings() {
+    char *name = "Alice";
+    int age = 30;
+    printf("Name: %d, Age: %s\n", name, age); // Incorrect format specifiers
 }
 
 int main() {
-    // Redefinition of 'main' function
-    printf("This is a redefined main function\n");
+    // Function call with incorrect return type
+    float product = multiply(3, 4); // Expected int, assigned to float
+
+    // Function call with missing return statement
+    int difference = subtract(10, 5);
+
+    // Function call with uninitialized pointer
+    uninitializedPointer();
+
+    // Function call with array access error
+    arrayAccess();
+
+    // Function call with logical error in loop
+    loopWithLogicalError();
+
+    // Function call causing division by zero
+    divideByZero();
+
+    // Function call with incorrect format specifiers
+    printStrings();
+
     return 0;
 }
