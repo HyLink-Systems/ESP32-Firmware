@@ -23,7 +23,6 @@ void app_main(void)
 {
     const int count = 32;
     const int max = 100;
-    poopy
     printf("In main application. Collecting %d random numbers from 1 to %d:\n", count, max);
     int *numbers = calloc(count, sizeof(numbers[0]));
     for (int i = 0; i < count; ++i) {
