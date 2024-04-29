@@ -24,6 +24,9 @@ void wifi_init_sta() {
     esp_wifi_start();
 }
 
+/**
+ * Code Entry point.
+*/
 void app_main() {
     esp_log_level_set("wifi", ESP_LOG_NONE);
     ESP_ERROR_CHECK(esp_event_loop_create_default());

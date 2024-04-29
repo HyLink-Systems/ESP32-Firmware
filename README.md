@@ -5,7 +5,7 @@
 Currently working on setup components seperately.
 
 > [!NOTE]
-> `../wifi-connect-STA.c` will need to have the credentials replaced currently to test out Wi-Fi access point based on what Wi-Fi you want to test connecting to. 
+> `../wifi-connect-STA.c` will need to have the credentials replaced currently to test out Wi-Fi access point based on what Wi-Fi you want to test connecting to.
 
 ## Current plan in this branch
 
