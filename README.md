@@ -5,7 +5,7 @@
 Currently working on setup components seperately.
 
 > [!NOTE]
-> `../wifi-connect-STA.c` will need to have the credential replaced currently to test out Wi-Fi access point based on what Wi-Fi you want to test connecting to.
+> `../wifi-connect-STA.c` will need to have the credentials replaced currently to test out Wi-Fi access point based on what Wi-Fi you want to test connecting to. 
 
 ## Current plan in this branch
 
@@ -15,7 +15,7 @@ Currently working on setup components seperately.
     3. after form submission —> reset wifi mode:
         1. SET `esp32c3` to to SAP mode and try wifi `10` times.
         2. TODO — somehow signal (maybe using LEDs) that Wi-Fi success? Fail?
-            1. if success — add SSID+password combination to NVS.
+            1. if success — **SAVE** SSID+password combination to NVS.
 2. SAP success —> then move onto MQTT
     1. TODO — read sensor loop, send via mqtt
 
@@ -45,5 +45,6 @@ initial shell setup:
 ```sh
 ./install.ps1
 ./export.ps1
+idf.py set-target esp32c3
 idf.py build
 ```
