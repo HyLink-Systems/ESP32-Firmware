@@ -5,8 +5,10 @@
 #include "esp_event.h"
 #include "esp_log.h"
 
-#define WIFI_SSID "YourWiFiSSID"
-#define WIFI_PASS "YourWiFiPassword"
+#define WIFI_SSID "ESP32_SoftAP"
+#define WIFI_PASS "12345678"
+
+// #define WIFI_SSID ""
 
 void wifi_init_sta() {
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
