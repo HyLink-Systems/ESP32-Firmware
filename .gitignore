@@ -1,7 +1,7 @@
 .config
 *.o
 *.pyc
-
+.gitignore
 # gtags
 GTAGS
 GRTAGS
