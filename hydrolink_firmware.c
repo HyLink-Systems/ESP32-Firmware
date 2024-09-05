@@ -25,6 +25,7 @@
 
 #define MAX_LITERS 75.7 /* Maximum allowable shower gallons */
 #define LITERS_USED (totalPulses / (float)PULSE_LITER_NUM)
+#define WATER_FLOW_SENSOR_PIN GPIO_NUM_1
 
 #define RED_LED_PIN     2 /* GPIO pin for Red LED */
 #define GREEN_LED_PIN   3 /* GPIO pin for Green LED */
@@ -231,7 +232,7 @@ void ledControllerThread(void* parameter) {
 void app_main() {
     /* Configure GPIO 1 as interrupt on rising edge for Water flow sensor */
     const gpio_config_t gpio1_struct = {
-        .pin_bit_mask = 1ULL << GPIO_NUM_1, /* PIN 1 */
+        .pin_bit_mask = 1ULL << WATER_FLOW_SENSOR_PIN, /* PIN 1 */
         .mode = GPIO_MODE_INPUT, /* Set pin 1 as input */
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
