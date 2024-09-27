@@ -41,7 +41,7 @@ typedef enum {
 /* ------------------ Water Flow Sensor Configurations ------------------- */
 #define PULSE_LITER_NUM         567                 /* (Pulses/Liter) Pulses per liter of water from the flow sensor */
 #define MAX_LITERS              75.7                /* (Liter) Maximum allowable liters of water */
-#define LITERS_USED (totalPulses / (float)PULSE_LITER_NUM) /* Calculation of liters used */
+#define LITERS_USED (systemData.totalPulses / (float)PULSE_LITER_NUM) /* Calculation of liters used */
 #define MAX_LENGTH_SHOWER 7200 // (Seconds)
 
 /* ------------------ Thermistor Circuit Configurations ------------------ */
@@ -86,16 +86,23 @@ TaskHandle_t tempMonitorHandle = NULL;
 /* Create task to track water usage time */
 TaskHandle_t timeMonitorHandle = NULL;
 
-/* ------------------ Global Variables ----------------------------------- */
-static volatile uint32_t totalPulses = 0;           /* Total number of pulses from the water flow sensor */
-static volatile double averageWaterTemp;            /* Average water temperature in Fahrenheit */
-static volatile uint32_t waterTempSamples = 0;      /* Number of water temperature samples collected */
-static volatile uint32_t waterRunningTime = 0;     /* Total time the water has been running in seconds */
-static TickType_t currShowerSessionTime = (TickType_t)NULL;    /* Total time since first water flow instance detected */
-static volatile dp temp_graph[MAX_LENGTH_SHOWER / 10]; // Data points every 10 seconds for temperature
-static uint16_t temp_graph_index = 0;
+/* ------------------ Global Variables ----------------------------------- */  
+typedef struct {
+    uint32_t totalPulses; /* Total number of pulses from the water flow sensor */
+    double averageWaterTemp; /* Average water temperature in C */
+    uint32_t waterTempSamples; /* Number of water temperature samples collected */
+    uint32_t waterRunningTime; /* Total time the water has been running in seconds */
+    TickType_t currShowerSessionTime; /* Total time since first water flow instance detected */
+    FINITE_STATES currState; /* Holds theSHOWER_STATE current state of the system*/
+} SystemData;
 
-FINITE_STATES currState = SETUP_STATE; /* Holds theSHOWER_STATE current state of the system*/
+static volatile SystemData systemData = {0};
+
+// static volatile dp temp_graph[MAX_LENGTH_SHOWER / 10]; // Data points every 10 seconds for temperature
+// static uint16_t temp_graph_index = 0;
+
+
+
 
 
 
@@ -106,87 +113,171 @@ FINITE_STATES currState = SETUP_STATE; /* Holds theSHOWER_STATE current state of
  * @param arg Pointer to the ISR argument.
  */
 void IRAM_ATTR waterFlowISR(void* arg) {
-    totalPulses++; /* Increment total pulses when water flow is detected */
-    currState = SHOWER_STATE;
+    systemData.totalPulses++; /* Increment total pulses when water flow is detected */
+    systemData.currState = SHOWER_STATE;
 }
+
+/**
+ * @brief Handle the setup state by checking if setup is complete.
+ * 
+ * If setup is complete, the system transitions to deep sleep. If not,
+ * it initiates the setup process.
+ * 
+ * @param NonexCountingSemaphore
+ * @return None
+ */
+void handleSetupState(void);
+
+/** 
+ * @brief Handle the shower state by monitoring water flow and time.
+ * 
+ * This function resumes the water temperature and time monitoring tasks.
+ * It checks if there was water flow since the last task run. If no water
+ * flow is detected within a certain time limit, the system transitions
+ * to the transmission state and calculates the entire shower session.
+ * 
+ * @param None
+ * @return None
+ */
+void handleShowerState(void);
+
+/**
+ * @brief Handle the transmit state by attempting data transmission.
+ * 
+ * This function tries to transmit data. If the transmission is successful,
+ * it transitions to the deep sleep state. If not, it retries a limited number
+ * of times. After max retries, it transitions to deep sleep regardless.
+ * 
+ * @param None
+ * @return None
+ */
+void handleTransmitState(void);
+
+/**
+ * @brief Handle the deep sleep state by setting up GPIO wakeup triggers.
+ * 
+ * This function checks the level of the hall effect sensor and configures the
+ * wakeup trigger for deep sleep accordingly. It then puts the system into deep sleep.
+ * 
+ * @param None
+ * @return None
+ */
+void handleDeepSleepState(void);
 
 /**
  * @brief This task will set the State of the system
  * @param Pointer to task paramaeter (NULL)
  */
 void stateManagerTask(void* parameter) {
-    /* Static var to hold last pulse count (will be used later to see if there was change) */
-    static uint32_t lastPulseCount = 0;
-    static uint8_t transmissionTryCount = 0;
-    static TickType_t recent_showerTimeStamp = (TickType_t)NULL;
 
-    for (;;)
-    {
-        if (currState == SETUP_STATE && setUpDone()) {
-            currState = DEEP_SLEEP_STATE;
-        } else {
-            startSetup();
-        }
+for (;;) {
+    switch (systemData.currState) {
+        case SETUP_STATE:
+            handleSetupState();
+            break;
 
-        if (currState == SHOWER_STATE) {
+        case SHOWER_STATE:
+            handleShowerState();
+            break;
 
-            /* Resume Tasks*/
-            vTaskResume(tempMonitorHandle);
-            vTaskResume(timeMonitorHandle);
+        case TRANSMIT_STATE:
+            handleTransmitState();
+            break;
 
-            /* If there was water flow since last time task ran "reset" timer. Else check if timer is under MAX_TIME_NO_WATER_FLOW. If greater, go to next state and calculate entire shower session*/
-            if (lastPulseCount - PULSE_HYSTERISIS >= totalPulses) {
-                recent_showerTimeStamp = xTaskGetTickCount();
-                lastPulseCount = totalPulses;
-            } else if ((pdTICKS_TO_MS(xTaskGetTickCount() - recent_showerTimeStamp) / 1000) >= MAX_TIME_NO_WATER_FLOW) {
-                currShowerSessionTime = (pdTICKS_TO_MS(xTaskGetTickCount() - currShowerSessionTime) / 1000) - MAX_TIME_NO_WATER_FLOW;
-                currState = TRANSMIT_STATE;
+        case DEEP_SLEEP_STATE:
+            handleDeepSleepState();
+            break;
 
-                /* Suspend for now */
-                vTaskSuspend(timeMonitorHandle);
-                vTaskSuspend(tempMonitorHandle);
-            }
-        }
-
-        if (currState == TRANSMIT_STATE) {
-            if (successTransmission() == 1) {
-                currState = DEEP_SLEEP_STATE;
-            } else if (transmissionTryCount > MAX_NUM_TRIES_TRANSMIT) {
-                retryTransmission();
-            } else {
-                currState = DEEP_SLEEP_STATE;
-            }
-        }
-
-        if (currState == DEEP_SLEEP_STATE) {
-            bool level = gpio_get_level(HALL_EFFECT_SENSOR);
-
-            esp_err_t ret;
-
-            /* If level is 0, then set trigger wake up to ESP_GPIO_WAKEUP_GPIO_HIGH, else put it to ESP_GPIO_WAKEUP_GPIO_LOW */
-            if (level) {
-                ret = esp_deep_sleep_enable_gpio_wakeup(1ULL << HALL_EFFECT_SENSOR, ESP_GPIO_WAKEUP_GPIO_LOW);
-
-            } else {
-                ret = esp_deep_sleep_enable_gpio_wakeup(1ULL << HALL_EFFECT_SENSOR , ESP_GPIO_WAKEUP_GPIO_HIGH);
-
-            }
-
-            if (ret == ESP_ERR_INVALID_ARG) {
-                printf("Invalid gpio arg for deep sleep wakeup\n");
-            } else if (ret == ESP_ERR_INVALID_STATE) {
-                printf("Invalid gpio state for deep sleep\n");
-            }
-
-            /* Go into deep sleep */
-            esp_deep_sleep_start();
-        }
+        default:
+            // Handle unexpected state
+            break;
     }
-
-    vTaskDelete(NULL);  // Ensure the task exits after finishing
-
+}
 
 }
+
+
+void handleSetupState() {
+    if (setUpDone()) {
+        systemData.currState = DEEP_SLEEP_STATE;
+    } else {
+        startSetup();
+    }
+}
+
+
+/* Static var to hold last pulse count (will be used later to see if there was change) */
+static uint32_t lastPulseCount = 0;
+static TickType_t recent_showerTimeStamp = (TickType_t)NULL;
+
+void handleShowerState() {
+
+  
+
+    /* Resume Tasks */
+    vTaskResume(tempMonitorHandle);
+    vTaskResume(timeMonitorHandle);
+
+    /* If there was water flow since last time task ran "reset" timer. Else check if timer is under MAX_TIME_NO_WATER_FLOW. If greater, go to next state and calculate entire shower session */
+    if (lastPulseCount - PULSE_HYSTERISIS >= systemData.totalPulses) {
+        recent_showerTimeStamp = xTaskGetTickCount();
+        lastPulseCount = systemData.totalPulses;
+    } else if ((pdTICKS_TO_MS(xTaskGetTickCount() - recent_showerTimeStamp) / 1000) >= MAX_TIME_NO_WATER_FLOW) {
+        systemData.currShowerSessionTime = (pdTICKS_TO_MS(xTaskGetTickCount() - systemData.currShowerSessionTime) / 1000) - MAX_TIME_NO_WATER_FLOW;
+        systemData.currState = TRANSMIT_STATE;
+
+        /* Suspend for now */
+        vTaskSuspend(timeMonitorHandle);
+        vTaskSuspend(tempMonitorHandle);
+    }
+}
+
+static uint8_t transmissionTryCount = 0;
+
+void handleTransmitState() {
+
+    if (successTransmission()) {
+        systemData.currState = DEEP_SLEEP_STATE;
+        transmissionTryCount = 0; // Reset counter on success
+    } else {
+        transmissionTryCount++;
+        if (transmissionTryCount < MAX_NUM_TRIES_TRANSMIT) {
+            retryTransmission();
+            transmissionTryCount = 0; // Reset on retry
+        } else {
+            systemData.currState = DEEP_SLEEP_STATE;
+        }
+    }
+}
+
+void handleDeepSleepState() {
+    bool level = gpio_get_level(HALL_EFFECT_SENSOR);
+
+    esp_err_t ret;
+
+    /* If level is 0, then set trigger wake up to ESP_GPIO_WAKEUP_GPIO_HIGH, else put it to ESP_GPIO_WAKEUP_GPIO_LOW */
+    if (level) {
+        ret = esp_deep_sleep_enable_gpio_wakeup(1ULL << HALL_EFFECT_SENSOR, ESP_GPIO_WAKEUP_GPIO_LOW);
+    } else {
+        ret = esp_deep_sleep_enable_gpio_wakeup(1ULL << HALL_EFFECT_SENSOR, ESP_GPIO_WAKEUP_GPIO_HIGH);
+    }
+
+    if (ret == ESP_ERR_INVALID_ARG) {
+        printf("Invalid gpio arg for deep sleep wakeup\n");
+    } else if (ret == ESP_ERR_INVALID_STATE) {
+        printf("Invalid gpio state for deep sleep\n");
+    }
+
+    /* Go into deep sleep */
+    esp_deep_sleep_start();
+}
+
+
+
+
+
+
+
 
 
 /**
@@ -227,7 +318,7 @@ retry:
  */
 void tempMonitorTask(void* parameter) {
     /* If showre is not running no need to run*/
-    if (currState != SHOWER_STATE) {
+    if (systemData.currState != SHOWER_STATE) {
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 
@@ -265,28 +356,26 @@ void tempMonitorTask(void* parameter) {
 
     for (;;) {
         /* First sample initialization */
-        if (waterTempSamples == 0) {
-            averageWaterTemp = getTemp(holdsCalValues);
+        if (systemData.waterTempSamples == 0) {
+            systemData.averageWaterTemp = getTemp(holdsCalValues);
         } else {
             /* Incremental average calculation */
-            averageWaterTemp = averageWaterTemp + ((getTemp(holdsCalValues) - averageWaterTemp) / waterTempSamples);
+            systemData.averageWaterTemp = systemData.averageWaterTemp + ((getTemp(holdsCalValues) - systemData.averageWaterTemp) / systemData.waterTempSamples);
         }
 #ifdef DEBUG
-        printf("Total Pulses: %lu\n", totalPulses);
-        printf("Shower Time Seconds: %lu\n", waterRunningTime);
+        printf("Total Pulses: %lu\n", systemData.totalPulses);
+        printf("Shower Time Seconds: %lu\n", systemData.waterRunningTime);
         printf("Current Water Temp %f\n\n\n\n", getTemp(holdsCalValues));
-        printf("Average Water Temp %f\n\n\n\n", averageWaterTemp);
+        printf("Average Water Temp %f\n\n\n\n", systemData.averageWaterTemp);
 #endif
 
         /* Increment sample count */ //(used for averageing)
-        waterTempSamples++;
+        systemData.waterTempSamples++;
 
         /* Block task for 1 second */
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }
-
-
 
 
 /**
@@ -295,26 +384,26 @@ void tempMonitorTask(void* parameter) {
  */
 void timeMonitorThread(void* parameter) {
     /* If showre is not running no need to run*/
-    if (currState != SHOWER_STATE) {
+    if (systemData.currState != SHOWER_STATE) {
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 
     static TickType_t lastTick = 0;                  /* Stores the last timestamp */
     static uint32_t lastPulseCount = 0;              /* Stores pulse count from the last iteration */
-    currShowerSessionTime = xTaskGetTickCount();      /* Store tick count so shower session can be calculated after */
+    systemData.currShowerSessionTime = xTaskGetTickCount();      /* Store tick count so shower session can be calculated after */
 
     for (;;) {
 
         /* First time task is running*/
         if (lastTick != 0) {
-            uint32_t localTotalPulse = totalPulses; /* Create a local copy of totalPulses */
+            uint32_t localTotalPulse = systemData.totalPulses; /* Create a local copy of systemData.totalPulses */
 
             /* Check if pulses have increased since the last iteration (with hyterisis offet) */
             if (localTotalPulse - PULSE_HYSTERISIS > lastPulseCount) {
 
                 TickType_t currTick = xTaskGetTickCount(); /* Get the current tick count */
                 TickType_t elapsedTicks = currTick - lastTick; /* Calculate elapsed time */
-                waterRunningTime += pdTICKS_TO_MS(elapsedTicks) / 1000; /* Convert ticks to seconds */
+                systemData.waterRunningTime += pdTICKS_TO_MS(elapsedTicks) / 1000; /* Convert ticks to seconds */
                 lastTick = currTick; /* Update lastTick */
                 lastPulseCount = localTotalPulse; /* Update lastPulseCount */
 
@@ -324,7 +413,7 @@ void timeMonitorThread(void* parameter) {
 
 
         } else {
-            lastPulseCount = totalPulses; /* Initialize lastPulseCount */
+            lastPulseCount = systemData.totalPulses; /* Initialize lastPulseCount */
             lastTick = xTaskGetTickCount(); /* Initialize lastTick */
         }
 
@@ -334,7 +423,7 @@ void timeMonitorThread(void* parameter) {
 }
 // void update_graph(uint16_t seconds, uint8_t temperature){
 //     /* If showre is not running no need to run*/
-//     if (currState != SHOWER_STATE) {
+//     if (systemData.currState != SHOWER_STATE) {
 //          vTaskDelay(1000 / portTICK_PERIOD_MS);
 //     }
 
@@ -349,7 +438,15 @@ void timeMonitorThread(void* parameter) {
  * @brief Application entry point. Initializes ISRs and tasks.
  */
 void app_main() {
-    /* Configure GPIO 1 as interrupt on rising edge for water flow sensor */
+
+    xTaskCreate( stateManagerTask, FSM_STATE_MANAGER, STACK_SIZE_STATE_MANAGER, NULL, STATE_MANAGER_PRIORITY, &stateManager );
+
+    if ( stateManager == NULL ) {
+        perror("Failed to create stateManger Task\n");
+    }
+
+
+    /* Configure GPIO HALL_EFFECT_SENSOR as interrupt on rising edge for water flow sensor */
     const gpio_config_t gpio1_struct = {
         .pin_bit_mask = 1ULL << HALL_EFFECT_SENSOR,    /* Pin 1 */
         .mode = GPIO_MODE_INPUT,               /* Set pin 1 as input */
@@ -373,12 +470,6 @@ void app_main() {
     }
 
    
-    xTaskCreate( stateManagerTask, FSM_STATE_MANAGER, STACK_SIZE_STATE_MANAGER, NULL, STATE_MANAGER_PRIORITY, &stateManager );
-
-    if ( stateManager == NULL ) {
-        perror("Failed to create stateManger Task\n");
-    }
-
    
     xTaskCreate(tempMonitorTask, TASK_NAME_TEMP_MONITOR, STACK_SIZE_TEMP_MONITOR, NULL, TEMP_MONITOR_PRIORITY, &tempMonitorHandle);
 
