@@ -1,495 +1,556 @@
+#include <esp_sleep.h>
+#include <math.h>
 #include <stdio.h>
+
+#include "driver/adc.h"
+#include "driver/gpio.h"
+#include "esp_adc_cal.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_system.h"
-#include "driver/gpio.h"
-#include "driver/adc.h"
 #include "soc/adc_channel.h"
-#include "esp_adc_cal.h"
-#include <math.h>
-#include <esp_sleep.h>
 
-/* Dummy stub functions*/
-bool setUpDone() {
-    return 0;
-}
-void startSetup() {
-    return;
-}
-bool successTransmission() {
-    return 0;
-}
-void retryTransmission() {
-    return;
-}
+/* Stub functions for demonstration purposes */
+bool setUpDone() { return false; }
+void startSetup() {}
+bool successTransmission() { return false; }
+void retryTransmission() {}
 
-/* ENUMS for FSM states */
+/* Finite State Machine (FSM) states */
 typedef enum {
-    DEEP_SLEEP_STATE, /* System will be put to deep sleep mode when this state is detected */
-    SHOWER_STATE,     /* Water is actively flowing */
-    SHOWER_INTERVAL_STATE, /* System has not detected water flow for 30 seconds. Will go into light sleep mode. Use RTC to calculate amount of time in that mode. After 5 minutes wakeup from light sleep*/
-    TRANSMIT_STATE,   /* System will scan for know wifi access points. And on connection, send data packet then go to DEEP_SLEEP_MODE. On failure, go to light sleep */
-    SETUP_STATE,      /* System will allow user to add device to app. Go to Deep Sleep mode after success */
+  DEEP_SLEEP_STATE,
+  SHOWER_STATE,
+  POST_SHOWER_PROCESSING_STATE,
+  TRANSMIT_STATE,
+  SETUP_STATE
 } FINITE_STATES;
 
+/* Pin and Peripheral Configurations */
+#define THERMISTOR_CHANNEL (ADC1_CHANNEL_0)
+#define GPIO_OUT_VOLT 3.291
+#define HALL_EFFECT_SENSOR GPIO_NUM_5
 
-/* ------------------ Pin and Peripheral Configurations ------------------ */
-#define THERMISTOR_CHANNEL      (ADC1_CHANNEL_0)    /* ADC channel for thermistor GPIO */
-#define GPIO_OUT_VOLT           3.291                 /* (Volts) GPIO output voltage for thermistor circuit */
-#define HALL_EFFECT_SENSOR     GPIO_NUM_5
+/* Water Flow Sensor Configurations */
+#define PULSE_LITER_NUM 567
+#define MAX_LITERS 75.7
+#define PULSE_TO_LITER(pulseCount) (pulseCount / (float)PULSE_LITER_NUM)
+#define MAX_LENGTH_SHOWER 7200
 
-/* ------------------ Water Flow Sensor Configurations ------------------- */
-#define PULSE_LITER_NUM         567                 /* (Pulses/Liter) Pulses per liter of water from the flow sensor */
-#define MAX_LITERS              75.7                /* (Liter) Maximum allowable liters of water */
-#define LITERS_USED (systemData.totalPulses / (float)PULSE_LITER_NUM) /* Calculation of liters used */
-#define MAX_LENGTH_SHOWER 7200 // (Seconds)
+/* Thermistor Circuit Configurations */
+#define RESISTANCE_FIXED 0.817
+#define THERMISTOR_RESISTANCE(adcVoltageReading) \
+  ((RESISTANCE_FIXED * adcVoltageReading) / (GPIO_OUT_VOLT - adcVoltageReading))
+#define DEFAULT_VREF 1100
+#define VOLTAGE_TO_TEMP(thermistorResistance) \
+  (63.9 * exp(-0.185 * thermistorResistance))
 
-/* ------------------ Thermistor Circuit Configurations ------------------ */
-#define RESISTANCE_FIXED        0.817                /* (Ohm) Fixed resistor value in the thermistor voltage divider circuit */
-#define THERMISTOR_RESISTANCE(adcVoltageReading) ((RESISTANCE_FIXED * adcVoltageReading) / (GPIO_OUT_VOLT - adcVoltageReading)) /* Thermistor resistance calculation */
-#define DEFAULT_VREF        1100  // (Millivolts) Default reference voltage
-#define VOLTAGE_TO_TEMP(thermistorResistance) (63.9 * exp(-0.185 * thermistorResistance) ) /* Returns temp in C inputs in kiloOhms*/
+/* Task Configurations */
+#define STACK_SIZE_TEMP_MONITOR 2000
+#define STACK_SIZE_TIME_MONITOR 2000
+#define LOGGER_STACK_SIZE 2000
+#define STACK_SIZE_STATE_MANAGER 4000
+#define TEMP_MONITOR_PRIORITY 10
+#define STATE_MANAGER_PRIORITY 10
+#define TIME_MONITOR_PRIORITY 10
+#define LOGGER_PRIORITY 10
 
+/* Task Names */
+#define TASK_NAME_TEMP_MONITOR "tempMonitor"
+#define TASK_NAME_TIME_MONITOR "timeMonitor"
+#define FSM_STATE_MANAGER "stateManager"
+#define LOGGER  "logger"
 
-/* ------------------ Task Stack Sizes and Priorities -------------------- */
-#define STACK_SIZE_TEMP_MONITOR 2000                /* (Bytes) Stack size for temperature monitoring task */
-#define STACK_SIZE_TIME_MONITOR 2000                /* (Bytes) Stack size for time monitoring task */
-#define STACK_SIZE_STATE_MANAGER 1000               /* (Bytes) Stack size for state monitoring task*/
-#define TEMP_MONITOR_PRIORITY   10                  /* (Celsius) Task priority for temperature monitoring */
-#define STATE_MANAGER_PRIORITY 10                   /* Task priority for state managment*/
-#define TIME_MONITOR_PRIORITY   10                  /* (Seconds) Task priority for time monitoring */
-
-/* ------------------ Task Names ----------------------------------------- */
-#define TASK_NAME_TEMP_MONITOR  "tempMonitor"       /* Task name for temperature monitoring */
-#define TASK_NAME_TIME_MONITOR  "timeMonitor"       /* Task name for time monitoring */
-#define FSM_STATE_MANAGER "stateManager"            /* Task name for managing FSM States*/
-
-/* Struct for data point used in graphing temperature vs time */
+/* Data Structure for Temp/waterRate vs Time */
 typedef struct {
-    uint16_t time; // (Seconds)
-    uint8_t temp; // (Celsius)
-} dp;
+  uint16_t time;
+  uint8_t temp;
+  float waterRate;
+} __attribute__((packed)) dataPoint;
 
 #define DEBUG 1
-#define PULSE_HYSTERISIS 5 /* Ensures random propellor movment does not register as water flow*/
-#define MAX_TIME_NO_WATER_FLOW 150 /* Maximum time water flow can be off before changeing to Tramist state*/
-#define MAX_NUM_TRIES_TRANSMIT 3 /*Maximum number of tries device takes to send data*/
+#define PULSE_HYSTERISIS 5
+#define MAX_TIME_NO_WATER_FLOW_ALLOWED_MS (60 * 1000)
+#define MAX_NUM_TRIES_TRANSMIT 3
+#define temp_graph_length 540
 
-/* Task Handels */
-
-/* Create a task to manage the FSM state*/
-TaskHandle_t stateManager = NULL;
-
-/* Create task to monitor temperature every second */
-TaskHandle_t tempMonitorHandle = NULL;
-
-/* Create task to track water usage time */
-TaskHandle_t timeMonitorHandle = NULL;
-
-/* ------------------ Global Variables ----------------------------------- */  
+/* Task Handles */
+static TaskHandle_t stateManager = NULL;
+static TaskHandle_t timeMonitorHandle = NULL;
+static TaskHandle_t loggerHandle = NULL;
+/* Global System Data Structure */
 typedef struct {
-    uint32_t totalPulses; /* Total number of pulses from the water flow sensor */
-    double averageWaterTemp; /* Average water temperature in C */
-    uint32_t waterTempSamples; /* Number of water temperature samples collected */
-    uint32_t waterRunningTime; /* Total time the water has been running in seconds */
-    TickType_t currShowerSessionTime; /* Total time since first water flow instance detected */
-    FINITE_STATES currState; /* Holds theSHOWER_STATE current state of the system*/
+  uint32_t totalPulses;
+  float averageWaterTemp;
+  float currWaterTemp;
+  uint32_t waterTempSamples;
+  uint32_t waterRunningTime;
+  TickType_t showerSessionStartTime;
+  FINITE_STATES currState;
+  uint32_t currShowerSessionTime;
+  dataPoint temp_graph[temp_graph_length];
+  uint16_t temp_graph_index;
+  esp_adc_cal_characteristics_t* holdsCalValues;
+  float waterRate;
 } SystemData;
+
+typedef struct {
+    uint16_t litersUsed;
+    float averageWaterTemp;
+    uint32_t waterRunningTime;
+    uint32_t currShowerSessionTime;
+
+} __attribute__((packed)) TX_PACKET;
 
 static volatile SystemData systemData = {0};
 
-// static volatile dp temp_graph[MAX_LENGTH_SHOWER / 10]; // Data points every 10 seconds for temperature
-// static uint16_t temp_graph_index = 0;
+/* Counting and Binary Semaphores */
+SemaphoreHandle_t xSemaphoreCounting;
+SemaphoreHandle_t xSemaphoreWaterFlowing1;
+SemaphoreHandle_t xSemaphoreWaterFlowing2;
 
-
-
-
-
-
-/* ------------------ ISR and Task Functions ----------------------------- */
-
-/**
- * @brief ISR for water flow sensor.
- * @param arg Pointer to the ISR argument.
- */
+/* ISR for Water Flow Sensor */
 void IRAM_ATTR waterFlowISR(void* arg) {
-    systemData.totalPulses++; /* Increment total pulses when water flow is detected */
-    systemData.currState = SHOWER_STATE;
+  //printf("ISR Triggered at Line: %d\n", __LINE__);
+  xSemaphoreGive(xSemaphoreCounting);
+  xSemaphoreGive(xSemaphoreWaterFlowing1);
+  xSemaphoreGive(xSemaphoreWaterFlowing2);
 }
 
-/**
- * @brief Handle the setup state by checking if setup is complete.
- * 
- * If setup is complete, the system transitions to deep sleep. If not,
- * it initiates the setup process.
- * 
- * @param NonexCountingSemaphore
- * @return None
- */
+/* FSM State Handlers */
 void handleSetupState(void);
-
-/** 
- * @brief Handle the shower state by monitoring water flow and time.
- * 
- * This function resumes the water temperature and time monitoring tasks.
- * It checks if there was water flow since the last task run. If no water
- * flow is detected within a certain time limit, the system transitions
- * to the transmission state and calculates the entire shower session.
- * 
- * @param None
- * @return None
- */
 void handleShowerState(void);
-
-/**
- * @brief Handle the transmit state by attempting data transmission.
- * 
- * This function tries to transmit data. If the transmission is successful,
- * it transitions to the deep sleep state. If not, it retries a limited number
- * of times. After max retries, it transitions to deep sleep regardless.
- * 
- * @param None
- * @return None
- */
 void handleTransmitState(void);
-
-/**
- * @brief Handle the deep sleep state by setting up GPIO wakeup triggers.
- * 
- * This function checks the level of the hall effect sensor and configures the
- * wakeup trigger for deep sleep accordingly. It then puts the system into deep sleep.
- * 
- * @param None
- * @return None
- */
 void handleDeepSleepState(void);
+void handlePostShowerState(void);
 
-/**
- * @brief This task will set the State of the system
- * @param Pointer to task paramaeter (NULL)
- */
+float getTemp(esp_adc_cal_characteristics_t* calVals);
+
+/* FSM State Manager Task */
 void stateManagerTask(void* parameter) {
-
-for (;;) {
+  printf("Entering stateManagerTask at Line: %d\n", __LINE__);
+  systemData.currState = SHOWER_STATE;
+  for (;;) {
+    printf("Current State: %d at Line: %d\n", systemData.currState, __LINE__);
     switch (systemData.currState) {
-        case SETUP_STATE:
-            handleSetupState();
-            break;
-
-        case SHOWER_STATE:
-            handleShowerState();
-            break;
-
-        case TRANSMIT_STATE:
-            handleTransmitState();
-            break;
-
-        case DEEP_SLEEP_STATE:
-            handleDeepSleepState();
-            break;
-
-        default:
-            // Handle unexpected state
-            break;
+      case SETUP_STATE:
+        handleSetupState();
+        break;
+      case SHOWER_STATE:
+        handleShowerState();
+        break;
+      case POST_SHOWER_PROCESSING_STATE:
+        handlePostShowerState();
+        break;
+      case TRANSMIT_STATE:
+        handleTransmitState();
+        break;
+      case DEEP_SLEEP_STATE:
+        handleDeepSleepState();
+        break;
+      default:
+        printf("Unknown State at Line: %d\n", __LINE__);
+        break;
     }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
 }
 
+void printSystemData() {
+    printf("Total Pulses: %lu\n", systemData.totalPulses);
+    //printf("Average Water Temp: %.2f\n", systemData.averageWaterTemp);
+    printf("Current Water Temp: %.2f\n", systemData.currWaterTemp);
+    // printf("Water Temp Samples: %lu\n", systemData.waterTempSamples);
+    printf("Water Running Time: %lu\n", systemData.waterRunningTime);
+    printf("Shower Session Start Time: %lu\n", systemData.showerSessionStartTime);
+    printf("Current State: %d\n", systemData.currState);
+    printf("Current Shower Session Time: %lu\n", systemData.currShowerSessionTime);
+    printf("Water Rate: %.2f\n", systemData.waterRate);
+
+   
 }
 
 
-void handleSetupState() {
-    if (setUpDone()) {
-        systemData.currState = DEEP_SLEEP_STATE;
-    } else {
-        startSetup();
-    }
-}
+float calcAverage();
 
+float calcAverage() {
+    float average = 0.0;
+    int count = 0;
 
-/* Static var to hold last pulse count (will be used later to see if there was change) */
-static uint32_t lastPulseCount = 0;
-static TickType_t recent_showerTimeStamp = (TickType_t)NULL;
+    // Iterate over each entry in the temp_graph
+    for (int i = 0; i < systemData.temp_graph_index; i++) {
+        dataPoint entry = systemData.temp_graph[i];
 
-void handleShowerState() {
-
-  
-
-    /* Resume Tasks */
-    vTaskResume(tempMonitorHandle);
-    vTaskResume(timeMonitorHandle);
-
-    /* If there was water flow since last time task ran "reset" timer. Else check if timer is under MAX_TIME_NO_WATER_FLOW. If greater, go to next state and calculate entire shower session */
-    if (lastPulseCount - PULSE_HYSTERISIS >= systemData.totalPulses) {
-        recent_showerTimeStamp = xTaskGetTickCount();
-        lastPulseCount = systemData.totalPulses;
-    } else if ((pdTICKS_TO_MS(xTaskGetTickCount() - recent_showerTimeStamp) / 1000) >= MAX_TIME_NO_WATER_FLOW) {
-        systemData.currShowerSessionTime = (pdTICKS_TO_MS(xTaskGetTickCount() - systemData.currShowerSessionTime) / 1000) - MAX_TIME_NO_WATER_FLOW;
-        systemData.currState = TRANSMIT_STATE;
-
-        /* Suspend for now */
-        vTaskSuspend(timeMonitorHandle);
-        vTaskSuspend(tempMonitorHandle);
-    }
-}
-
-static uint8_t transmissionTryCount = 0;
-
-void handleTransmitState() {
-
-    if (successTransmission()) {
-        systemData.currState = DEEP_SLEEP_STATE;
-        transmissionTryCount = 0; // Reset counter on success
-    } else {
-        transmissionTryCount++;
-        if (transmissionTryCount < MAX_NUM_TRIES_TRANSMIT) {
-            retryTransmission();
-            transmissionTryCount = 0; // Reset on retry
-        } else {
-            systemData.currState = DEEP_SLEEP_STATE;
+        // Only consider entries where water rate is non-zero
+        if (entry.waterRate > 0) {
+            count++;
+            // Update average using incremental averaging formula
+            average += (entry.temp - average) / count;
         }
     }
+
+    return average;
+}
+
+void printTemperatureGraphWithAverage() {
+    printf("Temperature Graph:\n");
+    for (int i = 0; i < systemData.temp_graph_index; i++) {
+        dataPoint entry = systemData.temp_graph[i];
+     
+
+        printf("Index %d - Time: %u, Temp: %u, Water Rate: %.2f\n",
+               i, entry.time, entry.temp, entry.waterRate);
+    
+        
+    }
+
+    printSystemData();
+
+}
+
+
+void handlePostShowerState() {
+    /* turn off ISR*/
+
+    systemData.averageWaterTemp = calcAverage();
+
+
+    /*subtract MAX_TIME_NO_WATER_FLOW_ALLOWED_MS from currShowerSessionTime*/
+    systemData.currShowerSessionTime -= (MAX_TIME_NO_WATER_FLOW_ALLOWED_MS / 1000);
+    systemData.currState = TRANSMIT_STATE;
+
+
+
+    printTemperatureGraphWithAverage();
+
+
+
+
+}
+
+void handleSetupState() {
+  printf("Handling Setup State at Line: %d\n", __LINE__);
+  if (setUpDone()) {
+    systemData.currState = SHOWER_STATE;
+    printf("Setup Done, Switching to SHOWER_STATE at Line: %d\n", __LINE__);
+  } else {
+    startSetup();
+    printf("Starting Setup at Line: %d\n", __LINE__);
+  }
+}
+
+void handleShowerState() {
+  printf("Handling Shower State at Line: %d\n", __LINE__);
+  vTaskSuspend(timeMonitorHandle);
+  vTaskResume(timeMonitorHandle);
+  
+  if (xSemaphoreTake(xSemaphoreWaterFlowing1,
+                     pdMS_TO_TICKS(MAX_TIME_NO_WATER_FLOW_ALLOWED_MS)) == pdTRUE) {
+    systemData.totalPulses = uxSemaphoreGetCount(xSemaphoreCounting);
+    printf("Water Flow Detected, Total Pulses: %lu at Line: %d\n",
+           systemData.totalPulses, __LINE__);
+  } else {
+    systemData.currState = POST_SHOWER_PROCESSING_STATE;
+    vTaskSuspend(timeMonitorHandle);
+    vTaskSuspend(loggerHandle);
+    printf("No Water Flow, Switching to POST_SHOWER_PROCESSING_STATE at Line: %d\n",
+           __LINE__);
+  }
+}
+
+void handleTransmitState() {
+  static uint8_t transmissionTryCount = 0;
+  printf("Handling Transmit State at Line: %d\n", __LINE__);
+
+
+  if (successTransmission()) {
+    systemData.currState = DEEP_SLEEP_STATE;
+    transmissionTryCount = 0;
+    printf(
+        "Transmission Successful, Switching to DEEP_SLEEP_STATE at Line: %d\n",
+        __LINE__);
+  } else {
+    transmissionTryCount++;
+    printf("Transmission Failed, Attempt: %u at Line: %d\n",
+           transmissionTryCount, __LINE__);
+
+    if (transmissionTryCount < MAX_NUM_TRIES_TRANSMIT) {
+      retryTransmission();
+      printf("Retrying Transmission at Line: %d\n", __LINE__);
+    } else {
+      systemData.currState = DEEP_SLEEP_STATE;
+      printf("Max Retries Reached, Switching to DEEP_SLEEP_STATE at Line: %d\n",
+             __LINE__);
+    }
+  }
 }
 
 void handleDeepSleepState() {
-    bool level = gpio_get_level(HALL_EFFECT_SENSOR);
+  bool level = gpio_get_level(HALL_EFFECT_SENSOR);
 
-    esp_err_t ret;
+  esp_err_t ret;
 
-    /* If level is 0, then set trigger wake up to ESP_GPIO_WAKEUP_GPIO_HIGH, else put it to ESP_GPIO_WAKEUP_GPIO_LOW */
-    if (level) {
-        ret = esp_deep_sleep_enable_gpio_wakeup(1ULL << HALL_EFFECT_SENSOR, ESP_GPIO_WAKEUP_GPIO_LOW);
-    } else {
-        ret = esp_deep_sleep_enable_gpio_wakeup(1ULL << HALL_EFFECT_SENSOR, ESP_GPIO_WAKEUP_GPIO_HIGH);
-    }
+  if (level) {
+    ret = esp_deep_sleep_enable_gpio_wakeup(1ULL << HALL_EFFECT_SENSOR,
+                                            ESP_GPIO_WAKEUP_GPIO_LOW);
+    printf("Setting Deep Sleep Wakeup on Low Level at Line: %d\n", __LINE__);
 
-    if (ret == ESP_ERR_INVALID_ARG) {
-        printf("Invalid gpio arg for deep sleep wakeup\n");
-    } else if (ret == ESP_ERR_INVALID_STATE) {
-        printf("Invalid gpio state for deep sleep\n");
-    }
+  } else {
+    ret = esp_deep_sleep_enable_gpio_wakeup(1ULL << HALL_EFFECT_SENSOR,
+                                            ESP_GPIO_WAKEUP_GPIO_HIGH);
+    printf("Setting Deep Sleep Wakeup on High Level at Line: %d\n", __LINE__);
+  }
 
-    /* Go into deep sleep */
-    esp_deep_sleep_start();
+  if (ret == ESP_ERR_INVALID_ARG || ret == ESP_ERR_INVALID_STATE) {
+    printf("Error setting deep sleep wakeup trigger at Line: %d\n", __LINE__);
+  }
+
+  esp_deep_sleep_start();
 }
 
+esp_adc_cal_characteristics_t* initTempMonitor(void) {
+  if (adc1_config_channel_atten(THERMISTOR_CHANNEL, ADC_ATTEN_DB_11) !=
+          ESP_OK ||
+      adc1_config_width(ADC_WIDTH_BIT_12) != ESP_OK) {
+    perror("Failed to configure ADC");
+
+    return NULL;
+  }
+
+  esp_err_t retEfuse = esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_VREF);
+
+  if (retEfuse != ESP_OK) {
+    printf("ADC calibration error at Line: %d\n", __LINE__);
+  }
+
+  esp_adc_cal_characteristics_t* calVals =
+      calloc(1, sizeof(esp_adc_cal_characteristics_t));
+
+  if (calVals == NULL) {
+    perror("Memory allocation failed for calibration values");
+
+    return NULL;
+  }
+
+  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12,
+                           DEFAULT_VREF, calVals);
+
+  return calVals;
+}
+
+void loggerThread(void* parameter) {
+    static uint16_t lastPulseCount = 0;
+    printf("[Line %d] - Initializing lastPulseCount to 0.\n", __LINE__);
+
+    systemData.showerSessionStartTime = xTaskGetTickCount();
+    printf("[Line %d] - Set shower session start time at tick %lu.\n", __LINE__, systemData.showerSessionStartTime);
+
+    static TickType_t lastTick = 0;
+    printf("[Line %d] - Initializing lastTick to 0.\n", __LINE__);
+
+    for (;;) {
+        TickType_t currTick = xTaskGetTickCount();
+        systemData.currShowerSessionTime = pdTICKS_TO_MS(currTick - systemData.showerSessionStartTime) / 1000;
+        printf("[Line %d] - Updated current shower session time: %lu seconds.\n", __LINE__, systemData.currShowerSessionTime);
+
+        TickType_t elapsedTicks = currTick - lastTick;
+        printf("[Line %d] - Elapsed ticks: %lu.\n", __LINE__, elapsedTicks);
+
+        /* If there was no water flow */
+        if ((systemData.totalPulses - lastPulseCount) <= PULSE_HYSTERISIS) {
+
+            systemData.waterRate = 0;
+            dataPoint logEntry = {
+                systemData.currShowerSessionTime,
+                (uint8_t)NULL, /* Don't populate temp */
+                systemData.waterRate     /* Flow was 0 */
+            };
+            printf("[Line %d] - No water flow detected, created logEntry with zero flow.\n", __LINE__);
+            systemData.temp_graph[systemData.temp_graph_index] = logEntry;
+            printf("[Line %d] - Updated temp_graph at index %u.\n", __LINE__, systemData.temp_graph_index);
+        } else {
+            systemData.waterRate = (float)(PULSE_TO_LITER(systemData.totalPulses) - PULSE_TO_LITER(lastPulseCount)) / (pdTICKS_TO_MS(elapsedTicks) / 1000.0 / 60.0);
+
+            dataPoint logEntry = {
+                systemData.currShowerSessionTime,
+                (uint8_t)systemData.currWaterTemp,
+                (float)(PULSE_TO_LITER(systemData.totalPulses) - PULSE_TO_LITER(lastPulseCount))
+            };
+            printf("[Line %d] - Water flow detected, created logEntry with flow rate.\n", __LINE__);
+            systemData.temp_graph[systemData.temp_graph_index] = logEntry;
+            printf("[Line %d] - Updated temp_graph at index %u.\n", __LINE__, systemData.temp_graph_index);
+        }
+
+        systemData.temp_graph_index = (systemData.temp_graph_index+1) % temp_graph_length;
+        lastPulseCount = systemData.totalPulses;
+        printf("[Line %d] - Updated lastPulseCount to %u.\n", __LINE__, lastPulseCount);
+        vTaskDelay(5000 / portTICK_PERIOD_MS); // Assuming a delay is needed
+        printSystemData();
+    }
+}
+
+        
+
+
+void timeMonitorThread(void* parameter) {
+    printf("Line %d: Entering timeMonitorThread\n", __LINE__);
+    static TickType_t lastTick = 0;
+    printf("Line %d: Initialized lastTick\n", __LINE__);
+
+
+    for (;;) {
+        printf("Line %d: Loop start\n", __LINE__);
+        if (lastTick == 0) {
+            
+            lastTick = xTaskGetTickCount();
+            printf("Line %d: Updated lastTick in else block\n", __LINE__);
+
+            systemData.averageWaterTemp = getTemp(systemData.holdsCalValues);
+            printf("Line %d: Updated averageWaterTemp in else block\n", __LINE__);
+
+            printf("Line %d: Reset lastPulseCount in else block\n", __LINE__);
+        } else {
+            if (xSemaphoreTake(xSemaphoreWaterFlowing2, 0) == pdTRUE) {
+                printf("Line %d: Semaphore taken\n", __LINE__);
+                TickType_t currTick = xTaskGetTickCount();
+                printf("Line %d: Current tick count obtained\n", __LINE__);
+
+                TickType_t elapsedTicks = currTick - lastTick;
+                printf("Line %d: Calculated elapsedTicks\n", __LINE__);
+
+                lastTick = currTick;
+                printf("Line %d: Updated lastTick\n", __LINE__);
+
+                systemData.waterRunningTime += pdTICKS_TO_MS(elapsedTicks) / 1000;
+                printf("Line %d: Updated waterRunningTime\n", __LINE__);
+
+                systemData.currWaterTemp = getTemp(systemData.holdsCalValues);
+                printf("Line %d: Current temperature obtained\n", __LINE__);
+
+                // systemData.averageWaterTemp = systemData.averageWaterTemp +
+                //                             ((systemData.currWaterTemp - systemData.averageWaterTemp) /
+                //                             systemData.waterTempSamples);
+                printf("Line %d: Updated averageWaterTemp\n", __LINE__);
+
+                // systemData.waterTempSamples++;
+                // printf("Line %d: Incremented waterTempSamples\n", __LINE__);
+            }
+        }
+
+
+
+        vTaskDelay(3000 / portTICK_PERIOD_MS);
+        printf("Line %d: Delayed task by 5000 ms\n", __LINE__);
+    }
+}
+
+void app_main() {
+  printf("Line %d: in main\n", __LINE__);
+  xSemaphoreCounting = xSemaphoreCreateCounting(0xFFFF, 0);
+  printf("Line %d: Created counting semaphore\n", __LINE__);
+
+  xSemaphoreWaterFlowing1 = xSemaphoreCreateBinary();
+  printf("Line %d: Created binary semaphore 1\n", __LINE__);
+
+  xSemaphoreWaterFlowing2 = xSemaphoreCreateBinary();
+  printf("Line %d: Created binary semaphore 2\n", __LINE__);
 
 
 
 
+  printf("Line %d: Initializing Temperature Monitor\n", __LINE__);
+  systemData.holdsCalValues = initTempMonitor();
+
+  if (systemData.holdsCalValues == NULL) {
+    printf("Line %d: Initialization failed, exiting\n", __LINE__);
+    return;
+  }
+
+  const gpio_config_t gpio1_struct = {
+      .pin_bit_mask = 1ULL << HALL_EFFECT_SENSOR,
+      .mode = GPIO_MODE_INPUT,
+      .pull_up_en = GPIO_PULLUP_ENABLE,
+      .pull_down_en = GPIO_PULLDOWN_DISABLE,
+      .intr_type = GPIO_INTR_POSEDGE};
+  printf("Line %d: Configured GPIO for Hall Effect Sensor\n", __LINE__);
+
+  BaseType_t res1 = xTaskCreate(timeMonitorThread, TASK_NAME_TIME_MONITOR,
+                                STACK_SIZE_TIME_MONITOR, NULL,
+                                TIME_MONITOR_PRIORITY, &timeMonitorHandle);
+  printf("Line %d: Created time monitor task, result: %d\n", __LINE__, res1);
+  vTaskSuspend(timeMonitorHandle);
+
+  BaseType_t res2 =
+      xTaskCreate(stateManagerTask, FSM_STATE_MANAGER, STACK_SIZE_STATE_MANAGER,
+                  NULL, STATE_MANAGER_PRIORITY, &stateManager);
+  printf("Line %d: Created state manager task, result: %d\n", __LINE__, res2);
+  
+  BaseType_t res3 = xTaskCreate(loggerThread, LOGGER, LOGGER_STACK_SIZE, NULL, LOGGER_PRIORITY, &loggerHandle );
+
+
+  if (res1 == pdFAIL || res2 == pdFAIL) {
+    printf("Line %d: Task creation failed\n", __LINE__);
+  }
+
+
+  gpio_config(&gpio1_struct);
+  printf("Line %d: GPIO configuration applied\n", __LINE__);
+
+  gpio_install_isr_service(0);
+  printf("Line %d: ISR service installed\n", __LINE__);
+
+  gpio_isr_handler_add(HALL_EFFECT_SENSOR, waterFlowISR, NULL);
+  printf("Line %d: ISR handler added for Hall Effect Sensor\n", __LINE__);
 
 
 
+  vTaskSuspend(NULL);
+}
 
 /**
  * @brief Function to read temperature.
  * @param adcChars Pointer to the calibration characteristics.
  * @return Current temperature value in mV.
  */
-float getTemp(esp_adc_cal_characteristics_t* adcChars) {
-    uint32_t mV_reading = 0;
+
+float getTemp(esp_adc_cal_characteristics_t* adcChars)
+
+{
+  uint32_t mV_reading = 0;
 
 retry:
-    /* Get Voltage at ADC1 */
-    esp_err_t ret = esp_adc_cal_get_voltage(THERMISTOR_CHANNEL, adcChars, &mV_reading);
 
-    // VOLTAGE_TO_TEMP
-    if (ret == ESP_ERR_INVALID_STATE) {
-        goto retry;
-    } else if (ret == ESP_ERR_INVALID_ARG) {
-        perror("Invalid arguments for esp_adc_cal_get_voltage");
-        exit(-1);
-    }
+  /* Get Voltage at ADC1 */
 
-    float therm_resistance = THERMISTOR_RESISTANCE(mV_reading/1000.0);
-    float temp = VOLTAGE_TO_TEMP(therm_resistance);
+  esp_err_t ret =
+      esp_adc_cal_get_voltage(THERMISTOR_CHANNEL, adcChars, &mV_reading);
+
+  // VOLTAGE_TO_TEMP
+
+  if (ret == ESP_ERR_INVALID_STATE)
+
+    goto retry;
+
+  else if (ret == ESP_ERR_INVALID_ARG)
+
+  {
+    perror("Invalid arguments for esp_adc_cal_get_voltage");
+
+    exit(-1);
+  }
+
+  float therm_resistance = THERMISTOR_RESISTANCE(mV_reading / 1000.0);
+
+  float temp = VOLTAGE_TO_TEMP(therm_resistance);
 
 #ifdef DEBUG
-    printf("mV is: %lu\n", (mV_reading) );
-    printf("Resistance is: %f kOhms\n", therm_resistance);
-    printf("Temp is %f deg celsius\n", temp);
+
+//   printf("mV is: %lu\n", (mV_reading));
+
+//   printf("Resistance is: %f kOhms\n", therm_resistance);
+
+//   printf("Temp is %f deg celsius\n", temp);
+
 #endif
 
-    return temp; /* Return the voltage value for now, replace with temperature */
+  return temp;
 }
-
-/**
- * @brief Task for monitoring temperature.
- * @param parameter Pointer to the task parameter.
- */
-void tempMonitorTask(void* parameter) {
-    /* If showre is not running no need to run*/
-    if (systemData.currState != SHOWER_STATE) {
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
-
-    /* Configure the ADC channel */
-    if (adc1_config_channel_atten(THERMISTOR_CHANNEL, ADC_ATTEN_DB_11) != ESP_OK) {
-        perror("Failed to configure ADC");
-
-    }
-
-    if (adc1_config_width(ADC_WIDTH_BIT_12) != ESP_OK) {
-        perror("ADC config width error");
-
-    }
-
-    /* Check if ADC is calibrated */
-    esp_err_t retEfuse = esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_VREF);
-    if (retEfuse == ESP_ERR_NOT_SUPPORTED) {
-        perror("ADC not calibrated in efuse");
-
-    } else if (retEfuse == ESP_ERR_INVALID_ARG) {
-        printf("invalid arguments\n");
-    }
-    /* Allocate memory for calibration values */
-    esp_adc_cal_characteristics_t* holdsCalValues = (esp_adc_cal_characteristics_t*) calloc(1, sizeof(esp_adc_cal_characteristics_t));
-    if (holdsCalValues == NULL) {
-        perror("Failed to allocate memory for holdsCalValues");
-
-    }
-
-    /* Get ADC characteristics */
-    esp_adc_cal_value_t retCalVal = esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, DEFAULT_VREF, holdsCalValues);
-    if (retCalVal == ESP_ADC_CAL_VAL_DEFAULT_VREF) {
-        printf("Using default Vref: %d mV\n", DEFAULT_VREF);
-    }
-
-    for (;;) {
-        /* First sample initialization */
-        if (systemData.waterTempSamples == 0) {
-            systemData.averageWaterTemp = getTemp(holdsCalValues);
-        } else {
-            /* Incremental average calculation */
-            systemData.averageWaterTemp = systemData.averageWaterTemp + ((getTemp(holdsCalValues) - systemData.averageWaterTemp) / systemData.waterTempSamples);
-        }
-#ifdef DEBUG
-        printf("Total Pulses: %lu\n", systemData.totalPulses);
-        printf("Shower Time Seconds: %lu\n", systemData.waterRunningTime);
-        printf("Current Water Temp %f\n\n\n\n", getTemp(holdsCalValues));
-        printf("Average Water Temp %f\n\n\n\n", systemData.averageWaterTemp);
-#endif
-
-        /* Increment sample count */ //(used for averageing)
-        systemData.waterTempSamples++;
-
-        /* Block task for 1 second */
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
-}
-
-
-/**
- * @brief Task for monitoring the time water has been running.
- * @param parameter Pointer to the task parameter.
- */
-void timeMonitorThread(void* parameter) {
-    /* If showre is not running no need to run*/
-    if (systemData.currState != SHOWER_STATE) {
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
-
-    static TickType_t lastTick = 0;                  /* Stores the last timestamp */
-    static uint32_t lastPulseCount = 0;              /* Stores pulse count from the last iteration */
-    systemData.currShowerSessionTime = xTaskGetTickCount();      /* Store tick count so shower session can be calculated after */
-
-    for (;;) {
-
-        /* First time task is running*/
-        if (lastTick != 0) {
-            uint32_t localTotalPulse = systemData.totalPulses; /* Create a local copy of systemData.totalPulses */
-
-            /* Check if pulses have increased since the last iteration (with hyterisis offet) */
-            if (localTotalPulse - PULSE_HYSTERISIS > lastPulseCount) {
-
-                TickType_t currTick = xTaskGetTickCount(); /* Get the current tick count */
-                TickType_t elapsedTicks = currTick - lastTick; /* Calculate elapsed time */
-                systemData.waterRunningTime += pdTICKS_TO_MS(elapsedTicks) / 1000; /* Convert ticks to seconds */
-                lastTick = currTick; /* Update lastTick */
-                lastPulseCount = localTotalPulse; /* Update lastPulseCount */
-
-            } else {
-                lastTick = xTaskGetTickCount(); /* Reset lastTick if no water flow is detected */
-            }
-
-
-        } else {
-            lastPulseCount = systemData.totalPulses; /* Initialize lastPulseCount */
-            lastTick = xTaskGetTickCount(); /* Initialize lastTick */
-        }
-
-        /* Block task for 1 second */
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
-}
-// void update_graph(uint16_t seconds, uint8_t temperature){
-//     /* If showre is not running no need to run*/
-//     if (systemData.currState != SHOWER_STATE) {
-//          vTaskDelay(1000 / portTICK_PERIOD_MS);
-//     }
-
-//     dp current_data_point;
-//     current_data_point.temp = temperature;
-//     current_data_point.time = seconds;
-//     // Circular buffer in case it
-//     temp_graph[temp_graph_index++ % (MAX_LENGTH_SHOWER / 10)] = current_data_point;
-// }
-
-/**
- * @brief Application entry point. Initializes ISRs and tasks.
- */
-void app_main() {
-
-    xTaskCreate( stateManagerTask, FSM_STATE_MANAGER, STACK_SIZE_STATE_MANAGER, NULL, STATE_MANAGER_PRIORITY, &stateManager );
-
-    if ( stateManager == NULL ) {
-        perror("Failed to create stateManger Task\n");
-    }
-
-
-    /* Configure GPIO HALL_EFFECT_SENSOR as interrupt on rising edge for water flow sensor */
-    const gpio_config_t gpio1_struct = {
-        .pin_bit_mask = 1ULL << HALL_EFFECT_SENSOR,    /* Pin 1 */
-        .mode = GPIO_MODE_INPUT,               /* Set pin 1 as input */
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_POSEDGE
-    };
-
-    if (gpio_config(&gpio1_struct) != ESP_OK) {
-        perror("GPIO 1 interrupt configuring problem");
-    }
-
-    /* Initialize the ISR service */
-    if (gpio_install_isr_service(0) != ESP_OK) {
-        perror("Failed to initialize ISR service");
-    }
-
-    /* Attach ISR handler for water flow sensor */
-    if (gpio_isr_handler_add(HALL_EFFECT_SENSOR, waterFlowISR, NULL) != ESP_OK) {
-        perror("Error attaching to waterFlowISR");
-    }
-
-   
-   
-    xTaskCreate(tempMonitorTask, TASK_NAME_TEMP_MONITOR, STACK_SIZE_TEMP_MONITOR, NULL, TEMP_MONITOR_PRIORITY, &tempMonitorHandle);
-
-    if (tempMonitorHandle == NULL) {
-        perror("Failed to create tempMonitorTask");
-    }
-
-    /* Suspend for now */
-    vTaskSuspend(tempMonitorHandle);
-
-    xTaskCreate(timeMonitorThread, TASK_NAME_TIME_MONITOR, STACK_SIZE_TIME_MONITOR, NULL, TIME_MONITOR_PRIORITY, &timeMonitorHandle);
-
-    if (timeMonitorHandle == NULL) {
-        perror("Failed to create timeMonitorTask");
-    }
-
-    /* Suspend for now */
-    vTaskSuspend(timeMonitorHandle);
-
-    // Suspend the main task indefinitely
-    vTaskSuspend(NULL);
-}
-
