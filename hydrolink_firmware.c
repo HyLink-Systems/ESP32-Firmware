@@ -60,11 +60,11 @@ typedef enum {
 #define FSM_STATE_MANAGER "stateManager"
 #define LOGGER  "logger"
 
-/* Data Structure for Temp/waterRate vs Time */
+/* Data Structure for Temp/WaterRate vs Time */
 typedef struct {
   uint16_t time;
   uint8_t temp;
-  float waterRate;
+  float currWaterRate;
 } __attribute__((packed)) dataPoint;
 
 #define DEBUG 1
@@ -82,26 +82,27 @@ typedef struct {
   uint32_t totalPulses;
   float averageWaterTemp;
   float currWaterTemp;
+  float litersUsed;
   uint32_t waterTempSamples;
   uint32_t waterRunningTime;
   TickType_t showerSessionStartTime;
   FINITE_STATES currState;
   uint32_t currShowerSessionTime;
-  dataPoint temp_graph[temp_graph_length];
   uint16_t temp_graph_index;
   esp_adc_cal_characteristics_t* holdsCalValues;
-  float waterRate;
+  float currWaterRate;
+  dataPoint temp_graph[temp_graph_length];
 } SystemData;
 
+static volatile SystemData systemData = {0};
+
 typedef struct {
-    uint16_t litersUsed;
+    float litersUsed;
     float averageWaterTemp;
     uint32_t waterRunningTime;
     uint32_t currShowerSessionTime;
-
 } __attribute__((packed)) TX_PACKET;
 
-static volatile SystemData systemData = {0};
 
 /* Counting and Binary Semaphores */
 SemaphoreHandle_t xSemaphoreCounting;
@@ -156,7 +157,7 @@ void stateManagerTask(void* parameter) {
 }
 
 void printSystemData() {
-    printf("Total Pulses: %lu\n", systemData.totalPulses);
+    printf("\n\n\nTotal Pulses: %lu\n", systemData.totalPulses);
     //printf("Average Water Temp: %.2f\n", systemData.averageWaterTemp);
     printf("Current Water Temp: %.2f\n", systemData.currWaterTemp);
     // printf("Water Temp Samples: %lu\n", systemData.waterTempSamples);
@@ -164,9 +165,8 @@ void printSystemData() {
     printf("Shower Session Start Time: %lu\n", systemData.showerSessionStartTime);
     printf("Current State: %d\n", systemData.currState);
     printf("Current Shower Session Time: %lu\n", systemData.currShowerSessionTime);
-    printf("Water Rate: %.2f\n", systemData.waterRate);
-
-   
+    printf("Water Rate: %.2f\n\n\n\n\n", systemData.currWaterRate);  
+    printf("Liters Used: %f\n", systemData.litersUsed);
 }
 
 
@@ -181,7 +181,7 @@ float calcAverage() {
         dataPoint entry = systemData.temp_graph[i];
 
         // Only consider entries where water rate is non-zero
-        if (entry.waterRate > 0) {
+        if (entry.currWaterRate > 0) {
             count++;
             // Update average using incremental averaging formula
             average += (entry.temp - average) / count;
@@ -195,10 +195,10 @@ void printTemperatureGraphWithAverage() {
     printf("Temperature Graph:\n");
     for (int i = 0; i < systemData.temp_graph_index; i++) {
         dataPoint entry = systemData.temp_graph[i];
-     
+        
 
         printf("Index %d - Time: %u, Temp: %u, Water Rate: %.2f\n",
-               i, entry.time, entry.temp, entry.waterRate);
+               i, entry.time, entry.temp, entry.currWaterRate);
     
         
     }
@@ -212,19 +212,15 @@ void handlePostShowerState() {
     /* turn off ISR*/
 
     systemData.averageWaterTemp = calcAverage();
-
+    printf("Average Water Temp: %.2f\n", systemData.averageWaterTemp);
 
     /*subtract MAX_TIME_NO_WATER_FLOW_ALLOWED_MS from currShowerSessionTime*/
     systemData.currShowerSessionTime -= (MAX_TIME_NO_WATER_FLOW_ALLOWED_MS / 1000);
     systemData.currState = TRANSMIT_STATE;
-
-
+    systemData.litersUsed = PULSE_TO_LITER(systemData.totalPulses);
+    
 
     printTemperatureGraphWithAverage();
-
-
-
-
 }
 
 void handleSetupState() {
@@ -242,7 +238,6 @@ void handleShowerState() {
   printf("Handling Shower State at Line: %d\n", __LINE__);
   vTaskSuspend(timeMonitorHandle);
   vTaskResume(timeMonitorHandle);
-  
   if (xSemaphoreTake(xSemaphoreWaterFlowing1,
                      pdMS_TO_TICKS(MAX_TIME_NO_WATER_FLOW_ALLOWED_MS)) == pdTRUE) {
     systemData.totalPulses = uxSemaphoreGetCount(xSemaphoreCounting);
@@ -339,50 +334,50 @@ esp_adc_cal_characteristics_t* initTempMonitor(void) {
 
 void loggerThread(void* parameter) {
     static uint16_t lastPulseCount = 0;
-    printf("[Line %d] - Initializing lastPulseCount to 0.\n", __LINE__);
+    // printf("[Line %d] - Initializing lastPulseCount to 0.\n", __LINE__);
 
     systemData.showerSessionStartTime = xTaskGetTickCount();
-    printf("[Line %d] - Set shower session start time at tick %lu.\n", __LINE__, systemData.showerSessionStartTime);
+    // printf("[Line %d] - Set shower session start time at tick %lu.\n", __LINE__, systemData.showerSessionStartTime);
 
     static TickType_t lastTick = 0;
-    printf("[Line %d] - Initializing lastTick to 0.\n", __LINE__);
+    // printf("[Line %d] - Initializing lastTick to 0.\n", __LINE__);
 
     for (;;) {
         TickType_t currTick = xTaskGetTickCount();
         systemData.currShowerSessionTime = pdTICKS_TO_MS(currTick - systemData.showerSessionStartTime) / 1000;
-        printf("[Line %d] - Updated current shower session time: %lu seconds.\n", __LINE__, systemData.currShowerSessionTime);
+        // printf("[Line %d] - Updated current shower session time: %lu seconds.\n", __LINE__, systemData.currShowerSessionTime);
 
         TickType_t elapsedTicks = currTick - lastTick;
-        printf("[Line %d] - Elapsed ticks: %lu.\n", __LINE__, elapsedTicks);
+        // printf("[Line %d] - Elapsed ticks: %lu.\n", __LINE__, elapsedTicks);
 
         /* If there was no water flow */
         if ((systemData.totalPulses - lastPulseCount) <= PULSE_HYSTERISIS) {
 
-            systemData.waterRate = 0;
+            systemData.currWaterRate = 0;
             dataPoint logEntry = {
                 systemData.currShowerSessionTime,
                 (uint8_t)NULL, /* Don't populate temp */
-                systemData.waterRate     /* Flow was 0 */
+                systemData.currWaterRate     /* Flow was 0 */
             };
-            printf("[Line %d] - No water flow detected, created logEntry with zero flow.\n", __LINE__);
+            // printf("[Line %d] - No water flow detected, created logEntry with zero flow.\n", __LINE__);
             systemData.temp_graph[systemData.temp_graph_index] = logEntry;
-            printf("[Line %d] - Updated temp_graph at index %u.\n", __LINE__, systemData.temp_graph_index);
+            // printf("[Line %d] - Updated temp_graph at index %u.\n", __LINE__, systemData.temp_graph_index);
         } else {
-            systemData.waterRate = (float)(PULSE_TO_LITER(systemData.totalPulses) - PULSE_TO_LITER(lastPulseCount)) / (pdTICKS_TO_MS(elapsedTicks) / 1000.0 / 60.0);
+            systemData.currWaterRate = (float)(PULSE_TO_LITER(systemData.totalPulses) - PULSE_TO_LITER(lastPulseCount)) / (pdTICKS_TO_MS(elapsedTicks) / 1000.0 / 60.0);
 
             dataPoint logEntry = {
                 systemData.currShowerSessionTime,
                 (uint8_t)systemData.currWaterTemp,
                 (float)(PULSE_TO_LITER(systemData.totalPulses) - PULSE_TO_LITER(lastPulseCount))
             };
-            printf("[Line %d] - Water flow detected, created logEntry with flow rate.\n", __LINE__);
+            // printf("[Line %d] - Water flow detected, created logEntry with flow rate.\n", __LINE__);
             systemData.temp_graph[systemData.temp_graph_index] = logEntry;
-            printf("[Line %d] - Updated temp_graph at index %u.\n", __LINE__, systemData.temp_graph_index);
+            // printf("[Line %d] - Updated temp_graph at index %u.\n", __LINE__, systemData.temp_graph_index);
         }
 
         systemData.temp_graph_index = (systemData.temp_graph_index+1) % temp_graph_length;
         lastPulseCount = systemData.totalPulses;
-        printf("[Line %d] - Updated lastPulseCount to %u.\n", __LINE__, lastPulseCount);
+        // printf("[Line %d] - Updated lastPulseCount to %u.\n", __LINE__, lastPulseCount);
         vTaskDelay(5000 / portTICK_PERIOD_MS); // Assuming a delay is needed
         printSystemData();
     }
@@ -398,33 +393,33 @@ void timeMonitorThread(void* parameter) {
 
 
     for (;;) {
-        printf("Line %d: Loop start\n", __LINE__);
+       // printf("Line %d: Loop start\n", __LINE__);
         if (lastTick == 0) {
             
             lastTick = xTaskGetTickCount();
-            printf("Line %d: Updated lastTick in else block\n", __LINE__);
+            // printf("Line %d: Updated lastTick in else block\n", __LINE__);
 
-            systemData.averageWaterTemp = getTemp(systemData.holdsCalValues);
-            printf("Line %d: Updated averageWaterTemp in else block\n", __LINE__);
+            //systemData.averageWaterTemp = getTemp(systemData.holdsCalValues);
+            // printf("Line %d: Updated averageWaterTemp in else block\n", __LINE__);
 
-            printf("Line %d: Reset lastPulseCount in else block\n", __LINE__);
+            // printf("Line %d: Reset lastPulseCount in else block\n", __LINE__);
         } else {
             if (xSemaphoreTake(xSemaphoreWaterFlowing2, 0) == pdTRUE) {
-                printf("Line %d: Semaphore taken\n", __LINE__);
+                // printf("Line %d: Semaphore taken\n", __LINE__);
                 TickType_t currTick = xTaskGetTickCount();
-                printf("Line %d: Current tick count obtained\n", __LINE__);
+                // printf("Line %d: Current tick count obtained\n", __LINE__);
 
                 TickType_t elapsedTicks = currTick - lastTick;
-                printf("Line %d: Calculated elapsedTicks\n", __LINE__);
+                // printf("Line %d: Calculated elapsedTicks\n", __LINE__);
 
                 lastTick = currTick;
-                printf("Line %d: Updated lastTick\n", __LINE__);
+                // printf("Line %d: Updated lastTick\n", __LINE__);
 
                 systemData.waterRunningTime += pdTICKS_TO_MS(elapsedTicks) / 1000;
-                printf("Line %d: Updated waterRunningTime\n", __LINE__);
+                // printf("Line %d: Updated waterRunningTime\n", __LINE__);
 
                 systemData.currWaterTemp = getTemp(systemData.holdsCalValues);
-                printf("Line %d: Current temperature obtained\n", __LINE__);
+                // printf("Line %d: Current temperature obtained\n", __LINE__);
 
                 // systemData.averageWaterTemp = systemData.averageWaterTemp +
                 //                             ((systemData.currWaterTemp - systemData.averageWaterTemp) /
@@ -439,7 +434,7 @@ void timeMonitorThread(void* parameter) {
 
 
         vTaskDelay(3000 / portTICK_PERIOD_MS);
-        printf("Line %d: Delayed task by 5000 ms\n", __LINE__);
+        //printf("Line %d: Delayed task by 5000 ms\n", __LINE__);
     }
 }
 
