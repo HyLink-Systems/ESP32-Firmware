@@ -3,13 +3,13 @@ dependencies:
     component_hash: null
     source:
       type: idf
-    version: 5.2.1
+    version: 5.1.2
   protocol_examples_common:
     component_hash: null
     source:
-      path: /Users/novelalam/esp/v5.2.1/esp-idf/examples/common_components/protocol_examples_common
+      path: C:\Users\shini\esp\v5.1.2\esp-idf\examples\common_components\protocol_examples_common
       type: local
     version: '*'
-manifest_hash: f844de8c5f1f974d6b80d0d03c08329aac2b95c21fc903332293d30db7c778c6
+manifest_hash: 9cb7986049bd1f47a2c9126ebff7b28db3590565b7339dc5ff16826b5da30059
 target: esp32c3
 version: 1.0.0
