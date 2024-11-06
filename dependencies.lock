@@ -1,0 +1,15 @@
+dependencies:
+  idf:
+    component_hash: null
+    source:
+      type: idf
+    version: 5.2.1
+  protocol_examples_common:
+    component_hash: null
+    source:
+      path: /Users/novelalam/esp/v5.2.1/esp-idf/examples/common_components/protocol_examples_common
+      type: local
+    version: '*'
+manifest_hash: f844de8c5f1f974d6b80d0d03c08329aac2b95c21fc903332293d30db7c778c6
+target: esp32c3
+version: 1.0.0
